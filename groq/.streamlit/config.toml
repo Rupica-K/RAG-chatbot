@@ -1,0 +1,6 @@
+[theme]
+base="dark"
+backgroundColor="#1e1e1e" # A deep, modern dark grey/black
+secondaryBackgroundColor="#2c2c2c" # Used for sidebar
+textColor="#ffffff"
+font="sans serif"

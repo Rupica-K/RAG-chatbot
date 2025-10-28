@@ -1,4 +1,6 @@
 langchain_core
+langchain
+pydantic
 python-dotenv
 streamlit
 langchain_community
