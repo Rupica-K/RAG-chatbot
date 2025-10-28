@@ -1,95 +1,112 @@
-import streamlit as st
 import os
-from langchain_groq import ChatGroq
+import time
+import streamlit as st
+from dotenv import load_dotenv
+
 from langchain_community.document_loaders import WebBaseLoader
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.chains.combine_documents import create_stuff_documents_chain
-from langchain_core.prompts import ChatPromptTemplate
-from langchain.chains import create_retrieval_chain
 from langchain_community.vectorstores import FAISS
-import time
+from langchain_core.prompts import PromptTemplate
+from langchain.chains import RetrievalQA
+from langchain_groq import ChatGroq
 
-from dotenv import load_dotenv
 load_dotenv()
 
-groq_api_key=os.environ['GROQ_API_KEY']
+# --- API Key Check ---
+groq_api_key = os.environ.get("GROQ_API_KEY")
+if not groq_api_key:
+    st.error("GROQ_API_KEY not found in environment. Add it to your .env or export it.")
+    st.stop()
 
-if "vectors" not in st.session_state:
-    st.session_state.embeddings=HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-    st.session_state.loader=WebBaseLoader("https://www.srmist.edu.in/")
-    st.session_state.docs=st.session_state.loader.load()
+# --- Streamlit UI ---
+st.set_page_config(page_title="SRM Intelligent Assistant", layout="centered")
+st.title("SRM Intelligent Assistant")
 
-    st.session_state.text_splitter=RecursiveCharacterTextSplitter(chunk_size=1000,chunk_overlap=200)
-    st.session_state.final_documents=st.session_state.text_splitter.split_documents(st.session_state.docs[:50])
-    st.session_state.vectors=FAISS.from_documents(st.session_state.final_documents,st.session_state.embeddings)
-
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-    st.session_state.messages.append({"role": "assistant", 
-        "content": "Hi, my name is Sia. I'm your SRM Intelligent Assistant. Are you a student or a visitor? I'm here to help you with anything related to SRM Institute!"})
-
-st.title("SRM Intelligent Assistant") # Updated Title
-
-# 1. Role Selection (I am a:)
-st.sidebar.header("Alex Johnson") # User name placeholder
+# --- Sidebar ---
+st.sidebar.header("Alex Johnson")  
 st.sidebar.subheader("I am a:")
 role = st.sidebar.radio(
     "Select your role:",
     ("SRM Student", "Visitor/Prospective Student"),
     label_visibility="collapsed"
 )
-st.sidebar.markdown("---") # Visual separator
+st.sidebar.markdown("---")
 st.sidebar.subheader("Quick Actions")
-# Use st.button for the actions
-st.sidebar.button("Chat History")
-st.sidebar.button("Settings")
-st.sidebar.button("Help & Support")
-llm=ChatGroq(groq_api_key=groq_api_key,
-             model_name="llama-3.1-8b-instant")
+st.sidebar.button("💬 Chat History")
+st.sidebar.button("⚙️ Settings")
+st.sidebar.button("❓ Help & Support")
 
-prompt=ChatPromptTemplate.from_template(
-"""
-Answer the questions based on the provided context only.
-Please provide the most accurate response based on the question
+# --- Cache Vectorstore ---
+@st.cache_resource
+def load_vectorstore():
+    embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+    loader = WebBaseLoader("https://www.srmist.edu.in/about-us") 
+    docs = loader.load()
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    final_docs = splitter.split_documents(docs)
+    return FAISS.from_documents(final_docs, embeddings)
+
+# --- RAG Pipeline ---
+if "vectors" not in st.session_state:
+    with st.spinner("Initializing RAG pipeline..."):
+        try:
+            st.session_state.vectors = load_vectorstore()
+            st.success("RAG Pipeline Ready!")
+        except Exception as e:
+            st.error(f"Error initializing RAG: {e}")
+            st.stop()
+
+# --- Chat History ---
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = [
+        {"role": "assistant", "content": "Hi, my name is Sia. I'm your SRM Intelligent Assistant. How can I help you today?"}
+    ]
+
+# --- LLM & QA Chain ---
+if "qa_chain" not in st.session_state:
+    llm = ChatGroq(groq_api_key=groq_api_key, model_name="llama-3.1-8b-instant")
+    prompt_template = PromptTemplate(
+        input_variables=["context", "question"],
+        template="""Answer the question only using the provided context.
 <context>
 {context}
-<context>
-Questions:{input}
+</context>
+Question: {question}
 """
-)
-document_chain = create_stuff_documents_chain(llm, prompt)
-retriever = st.session_state.vectors.as_retriever()
-retrieval_chain = create_retrieval_chain(retriever, document_chain)
+    )
+    retriever = st.session_state.vectors.as_retriever()
+    st.session_state.qa_chain = RetrievalQA.from_chain_type(
+        llm=llm,
+        chain_type="stuff",
+        retriever=retriever,
+        return_source_documents=True,
+        chain_type_kwargs={"prompt": prompt_template}
+    )
 
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.write(message["content"])
-prompt_input = st.chat_input("Ask your questions here")
-if prompt_input:
-    # 1. Store and display user message
-    st.session_state.messages.append({"role": "user", "content": prompt_input})
+# --- Chat Display ---
+for msg in st.session_state.chat_history:
+    with st.chat_message(msg["role"]):
+        st.write(msg["content"])
+
+# --- Chat Input ---
+query = st.chat_input("Ask your questions here")
+if query:
+    st.session_state.chat_history.append({"role": "user", "content": query})
     with st.chat_message("user"):
-        st.write(prompt_input)
-    # 2. Generate and display assistant response
+        st.write(query)
+
+    qa = st.session_state.qa_chain
     with st.spinner("Sia is thinking..."):
-        start=time.process_time()
-        # Use the retrieval chain
-        response = retrieval_chain.invoke({"input": prompt_input})
-        assistant_response = response['answer']
-        
-        # Store assistant message
-        st.session_state.messages.append({"role": "assistant", "content": assistant_response})
-        
-        # Display response
+        start = time.process_time()
+        result = qa({"query": query})
+        answer = result.get("result") or result.get("answer") or "No answer found."
+        st.session_state.chat_history.append({"role": "assistant", "content": answer})
+
         with st.chat_message("assistant"):
-            st.write(assistant_response)
-            
-            # Display Context (Retrieved documents)
+            st.write(answer)
             with st.expander("Context Used"):
-                # Find relevant chunks
-                for i, doc in enumerate(response["context"]):
+                for doc in result.get("source_documents", []):
                     st.write(doc.page_content)
-                    st.write("--------------------------------")
-        
-        print("Response time :",time.process_time()-start)
+                    st.write("---")
+        print("Response time:", time.process_time() - start)
